@@ -1,5 +1,8 @@
-# torch_nlp_sequence_models_tutorial
-Update: Now there is Tutorial 5 solutions too, batched and/or combeined with tutorial 4
+torch Natural Language Processing Tutorial Solutions
+---
+
+Update: Now there is Tutorial 5 solutions too, batched and/or combined with tutorial 4; and the notebooks for the previous tutorials. 
+To speed up, I mean batch, tutorial 5 I have used Lattice LSTM, credit to https://github.com/YuxueShi/LatticeLSTM 
 
 My solution to tutorial 4 from pytorch's official tutorial series, Deep Learning for NLP with Pytorch -Sequence Models and Long-Short Term Memory Networks
 

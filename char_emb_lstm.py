@@ -31,11 +31,11 @@ HIDDEN_DIM = 6
 
 class CharEmbLSTMTagger(nn.Module):
 
-    def __init__(self, embedding_dim, char_embedding_dim, hidden_dim, charset_size, vocab_size, tagset_size, pad):
+    def __init__(self, embedding_dim, char_embedding_dim, hidden_dim, charset_size, vocab_size, tagset_size):
         super(CharEmbLSTMTagger, self).__init__()
         self.hidden_dim = hidden_dim
 
-        self.char_embeddings = nn.Embedding(charset_size, char_embedding_dim, padding_idx=pad)
+        self.char_embeddings = nn.Embedding(charset_size, char_embedding_dim)
         self.word_embeddings = nn.Embedding(vocab_size, embedding_dim)
 
         # The LSTM takes word embeddings as inputs, and outputs hidden states
@@ -50,9 +50,9 @@ class CharEmbLSTMTagger(nn.Module):
         word_char_embeds = []
         for i in range(len(char_sentence)):
             char_embeds = self.char_embeddings(char_sentence[i])
-            char_lstm_out, (hidden, cell) = self.lstm_char(char_embeds.view(len(char_sentence[i]),1,-1))
+            char_lstm_out, hidden_w = self.lstm_char(char_embeds.view(len(char_sentence[i]),1,-1))
             word_embeds = self.word_embeddings(sentence[i])
-            word_char_embeds.append(torch.cat((word_embeds, hidden.view(-1)), dim=0))
+            word_char_embeds.append(torch.cat((word_embeds, hidden_w[0].view(-1)), dim=0))
 
         word_char_embeds = torch.stack(word_char_embeds)
         lstm_out, _ = self.lstm_word(word_char_embeds.view(len(sentence), 1, -1))
@@ -96,7 +96,7 @@ tensor([[[-0.1002, -0.0527]],
 
         [[-0.3598, -0.1478]],
 
-        [[-0.3256, -0.2448]]])   ==> hidden
+        [[-0.3256, -0.2448]]])
 """
 
 
@@ -109,7 +109,7 @@ char_sentence = [[0, 1, 2, 3, 4], [5, 6, 3, 4, 8], [2, 1,8,8,8], [7,8,8,8,8]]
 char_sentence=torch.tensor(char_sentence, dtype=torch.long)
 sentence=torch.tensor(sentence, dtype=torch.long)
 
-mdl =  CharEmbLSTMTagger(embedding_dim=6, char_embedding_dim=2, hidden_dim=5, charset_size=9, vocab_size=4, tagset_size=2, pad=8)
+mdl =  CharEmbLSTMTagger(embedding_dim=6, char_embedding_dim=2, hidden_dim=5, charset_size=9, vocab_size=4, tagset_size=2)
 loss_function = nn.NLLLoss()
 optimizer = optim.SGD(mdl.parameters(), lr=0.1)
 
