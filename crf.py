@@ -6,14 +6,17 @@
 from __future__ import print_function
 
 import datetime
+import string
 
 import torch
 import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
+from torch import optim
 from torch.nn.utils.rnn import pad_sequence
 
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 
 t0 = datetime.datetime.now()
 
@@ -21,6 +24,26 @@ torch.manual_seed(1)
 START_TAG = -2
 STOP_TAG = -1
 
+
+def prepare_sequence(seq, to_ix):
+    idxs = [to_ix[w] for w in seq]
+    return torch.tensor(idxs, dtype=torch.long)
+
+char_to_ix = {char: enum + 1 for (enum, char) in enumerate(string.printable + 'ğüşıöçÜŞİÖÇ')}
+char_to_ix['<PAD>'] = 0
+
+def prepare_char_sequence(seq):
+    seq = [torch.LongTensor([char_to_ix[c] for c in w]) for w in seq]
+    lengths = torch.LongTensor(list(map(len, seq)))
+    seq = pad_sequence(seq, batch_first=True, padding_value=0)
+    lengths, perm_idx = lengths.sort(0, descending=True)
+    seq = seq[perm_idx]
+    # seq = seq.transpose(0, 1)
+    # .view(1, len(training_data[0][0]))
+    # seq = seq.view(1, seq.shape[0], seq.shape[1])
+    # lengths = lengths.view(1, -1)
+    # perm_idx = perm_idx.view(1, -1)
+    return seq, lengths, perm_idx
 
 # Compute log sum exp in a numerically stable way for the forward algorithm
 def log_sum_exp(vec, m_size):
@@ -36,16 +59,28 @@ def log_sum_exp(vec, m_size):
     max_score = torch.gather(vec, 1, idx.view(-1, 1, m_size)).view(-1, 1, m_size)  # B * M
     return max_score.view(-1, m_size) + torch.log(torch.sum(torch.exp(vec - max_score.expand_as(vec)), 1)).view(-1, m_size)  # B * M
 
+# class myDataParallel(nn.DataParallel):
+#     def __init__(self, model):
+#         super(myDataParallel, self).__init__(model)
+#         self.model = model
+#
+#     def neg_log_likelihood(self, sentence, char_sentence, char_lengths, perm_idx, tags):
+#         return self.model.neg_log_likelihood(sentence, char_sentence, char_lengths, perm_idx, tags)
+
+
 class CRF(nn.Module):
 
-    def __init__(self, tagset_size, vocab_size, gpu):
+    def __init__(self, tagset_size, vocab_size, charset_size, gpu): # embedding_dim, hidden_dim, char_embedding_dim,
         super(CRF, self).__init__()
         print("build CRF...")
         self.gpu = gpu
         # Matrix of transition parameters.  Entry i,j is the score of transitioning from i to j.
         self.tagset_size = tagset_size
+        self.char_embeds = nn.Embedding(charset_size, CHAR_EMBEDDING_DIM, padding_idx=0)
         self.word_embeds = nn.Embedding(vocab_size, EMBEDDING_DIM, padding_idx=0)
-        self.lstm = nn.LSTM(EMBEDDING_DIM, HIDDEN_DIM // 2,
+        self.lstm_char = nn.LSTM(CHAR_EMBEDDING_DIM, CHAR_EMBEDDING_DIM// 2,
+                            num_layers=1, bidirectional=True, batch_first=True)
+        self.lstm = nn.LSTM(EMBEDDING_DIM+CHAR_EMBEDDING_DIM, HIDDEN_DIM // 2,
                             num_layers=1, bidirectional=True, batch_first=True)
         self.hidden2tag = nn.Linear(HIDDEN_DIM, self.tagset_size+2)
 
@@ -116,13 +151,40 @@ class CRF(nn.Module):
         final_partition = cur_partition[:, STOP_TAG]
         return final_partition.sum(), scores
 
-    def _get_lstm_features(self, sentence_batch):
+    def _get_lstm_features(self, sentence_batch, char_sentences, char_lengthss, perm_idcs):
         batch_size = sentence_batch.shape[0]
         batch_length = sentence_batch.shape[1]
-        embeds = self.word_embeds(sentence_batch).view(batch_size, batch_length, -1)
+
+        hiddens = torch.zeros(batch_size, batch_length, CHAR_EMBEDDING_DIM)
+        for i in range(batch_size):
+            char_sentence = char_sentences[i]
+            char_lengths = char_lengthss[i]
+            perm_idx = perm_idcs[i]
+
+            char_embeds = self.char_embeds(char_sentence)
+            packed = pack_padded_sequence(char_embeds, char_lengths, batch_first=True)
+            packed_out, (hidden, cell) = self.lstm_char(packed)
+
+            # sort tuple of original index and permutation index according to permutation index in order to reverse the sort
+            reverse_perm = sorted(list(zip(range(len(char_sentence)), perm_idx.numpy())), key=lambda x: x[1])
+            # get rid of permutation index to use it as index slicer; to get the right hidden layer of character embeddings
+            # to add to word embeddings
+            reverse_perm = [x[0] for x in reverse_perm]
+            # reshape from 3d to 2d to match shape of word embeddings
+            hidden = hidden.view(len(char_sentence), -1)
+            hidden = hidden[reverse_perm]
+            hiddens[i, :len(char_sentence), :] = hidden
+
+        word_embeds = self.word_embeds(sentence_batch)
+        word_char_embeds = torch.cat((word_embeds, hiddens), dim=2)
+
+
+        # embeds = self.word_embeds(sentence_batch).view(batch_size, batch_length, -1)
+        embeds = word_char_embeds.view(batch_size, batch_length, -1)
         lstm_out, _ = self.lstm(embeds)
         lstm_feats = self.hidden2tag(lstm_out)
         return lstm_feats
+
 
     def _viterbi_decode(self, feats, mask):
         """
@@ -218,8 +280,8 @@ class CRF(nn.Module):
         decode_idx = decode_idx.transpose(1,0)
         return path_score, decode_idx
 
-    def forward(self, batch_sentences, mask):
-        feats = self._get_lstm_features(batch_sentences)
+    def forward(self, batch_sentences, mask, char_sentence, char_lengths, perm_idx):
+        feats = self._get_lstm_features(batch_sentences, char_sentence, char_lengths, perm_idx)
         path_score, best_path = self._viterbi_decode(feats, mask)
         return path_score, best_path
         
@@ -275,9 +337,9 @@ class CRF(nn.Module):
         gold_score = tg_energy.sum() + end_energy.sum()
         return gold_score
 
-    def neg_log_likelihood(self, sents, mask, tags):
+    def neg_log_likelihood(self, sents, mask, tags, char_sentence, char_lengths, perm_idx):
         # nonegative log likelihood
-        feats = self._get_lstm_features(sents)
+        feats = self._get_lstm_features(sents, char_sentence, char_lengths, perm_idx)
         forward_score, scores = self._calculate_PZ(feats, mask)
         gold_score = self._score_sentence(scores, mask, tags)
         # print "batch, f:", forward_score.data[0], " g:", gold_score.data[0], " dis:", forward_score.data[0] - gold_score.data[0]
@@ -291,6 +353,7 @@ class CRF(nn.Module):
 
 EMBEDDING_DIM = 5
 HIDDEN_DIM = 4
+CHAR_EMBEDDING_DIM = 4
 
 # Make up some training data
 training_data = [(
@@ -312,20 +375,28 @@ for sentence, tags in training_data:
 
 tag_to_ix = {"B": 1, "I": 2, "O": 3}
 
-model = CRF(tagset_size=len(tag_to_ix)+1, vocab_size=len(word_to_ix)+1, gpu=False)
+model = CRF(tagset_size=len(tag_to_ix)+1, vocab_size=len(word_to_ix)+1, charset_size=len(char_to_ix), gpu=False)
 optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-4)
 
 # Check predictions before training
 with torch.no_grad():
     precheck_sent = prepare_sequence(training_data[0][0], word_to_ix).view(1, len(training_data[0][0]))
     mask = torch.ones(precheck_sent.shape)
-    print(model(precheck_sent, mask))
+    char_inputs, char_lengths, perm_idx = prepare_char_sequence(training_data[0][0])
+    print(model(precheck_sent, mask, [char_inputs], [char_lengths], [perm_idx]))
 
 X_tr = []
 y_tr = []
+char_tr = []
+char_lengths_tr = []
+perm_idcs_tr = []
 for sentence,tags in training_data*100:
     X_tr.append(prepare_sequence(sentence, word_to_ix))
     y_tr.append(prepare_sequence(tags, tag_to_ix))
+    char_inputs, char_lengths, perm_idx = prepare_char_sequence(sentence)
+    char_tr.append(char_inputs)
+    char_lengths_tr.append(char_lengths)
+    perm_idcs_tr.append(perm_idx)
 X_tr = pad_sequence(X_tr, batch_first=True, padding_value=0)
 y_tr = pad_sequence(y_tr, batch_first=True, padding_value=0)
 mask = X_tr!=0
@@ -343,9 +414,13 @@ for epoch in range(10):  # again, normally you would NOT do 300 epochs, it is to
         batch_sentences = X_tr[index:index + batch_size]
         batch_mask = mask[index:index + batch_size]
         batch_tags = y_tr[index:index + batch_size]
+        batch_char_input = char_tr[index:index + batch_size]
+        batch_char_lengths = char_lengths_tr[index:index + batch_size]
+        batch_perm_idcs = perm_idcs_tr[index:index + batch_size]
 
         # Step 3. Run our forward pass.
-        loss = model.neg_log_likelihood(batch_sentences, batch_mask, batch_tags)
+        loss = model.neg_log_likelihood(batch_sentences, batch_mask, batch_tags, batch_char_input, batch_char_lengths,
+                                        batch_perm_idcs)
         # print(loss)
         # Step 4. Compute the loss, gradients, and update the parameters by
         # calling optimizer.step()
@@ -357,7 +432,8 @@ for epoch in range(10):  # again, normally you would NOT do 300 epochs, it is to
 with torch.no_grad():
     precheck_sent = prepare_sequence(training_data[0][0], word_to_ix).view(1, len(training_data[0][0]))
     mask = torch.ones(precheck_sent.shape)
-    print(model(precheck_sent, mask))
+    char_inputs, char_lengths, perm_idx = prepare_char_sequence(training_data[0][0])
+    print(model(precheck_sent, mask, [char_inputs], [char_lengths], [perm_idx]))
 
 
 t1 = datetime.datetime.now()

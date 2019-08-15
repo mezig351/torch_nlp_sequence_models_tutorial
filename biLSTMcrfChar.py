@@ -51,7 +51,8 @@ class BiLSTM_CRF(nn.Module):
 
         self.char_embeds = nn.Embedding(charset_size, char_embedding_dim)
         self.word_embeds = nn.Embedding(vocab_size, embedding_dim)
-        self.lstm_char = nn.LSTM(char_embedding_dim, char_embedding_dim)
+        self.lstm_char = nn.LSTM(char_embedding_dim, char_embedding_dim // 2,
+                            num_layers=1, bidirectional=True)
         self.lstm_word = nn.LSTM(embedding_dim + char_embedding_dim,  hidden_dim // 2,
                             num_layers=1, bidirectional=True)
 
@@ -236,7 +237,7 @@ START_TAG = "<START>"
 STOP_TAG = "<STOP>"
 EMBEDDING_DIM = 5
 HIDDEN_DIM = 4
-CHAR_EMBEDDING_DIM=3
+CHAR_EMBEDDING_DIM=4
 
 # Make up some training data
 training_data = [(
