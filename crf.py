@@ -27,19 +27,22 @@ STOP_TAG = -1
 EMBEDDING_DIM = 5
 HIDDEN_DIM = 4
 CHAR_EMBEDDING_DIM = 4
+MORPH_EMBEDDING_DIM = 4
 
 # Make up some training data
 training_data = [(
     "the wall street journal reported today that apple corporation made money".split(),
-    "B I I I O O O B I O O".split()
+    "B I I I O O O B I O O".split(),
+    "A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc".split()
 ), (
     "georgia tech is a university in georgia".split(),
-    "B I O O O O B".split()
+    "B I O O O O B".split(),
+    "A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc A3sg|P3sg|Loc".split()
 )]
 
 
 word_to_ix = {}
-for sentence, tags in training_data:
+for sentence, _, _ in training_data:
     for word in sentence:
         if word not in word_to_ix:
             word_to_ix[word] = len(word_to_ix)+1
@@ -51,16 +54,22 @@ char_to_ix['<PAD>'] = 0
 char_to_ix['<START>'] = len(char_to_ix)
 char_to_ix['<STOP>'] = len(char_to_ix)
 
+morphchar_to_ix = {}
+for c in 'A3sg|P3sg|Loc':
+    if c not in morphchar_to_ix:
+        morphchar_to_ix[c] = len(morphchar_to_ix) + 1
+morphchar_to_ix['<PAD>'] = 0
+morphchar_to_ix['<START>'] = len(morphchar_to_ix)
+morphchar_to_ix['<STOP>'] = len(morphchar_to_ix)
+
 def prepare_sequence(seq, to_ix):
     idxs = [to_ix[w] for w in seq]
     return torch.tensor(idxs, dtype=torch.long)
 
-
-
-def prepare_char_sentence(seq):
-    seq = [[char_to_ix[c] for c in w] for w in seq]
-    seq[0] = [char_to_ix['<START>']] + seq[0]
-    seq[-1] = seq[-1] + [char_to_ix['<STOP>']]
+def prepare_char_sentence(seq, to_ix):
+    seq = [[to_ix[c] for c in w] for w in seq]
+    seq[0] = [to_ix['<START>']] + seq[0]
+    seq[-1] = seq[-1] + [to_ix['<STOP>']]
     return seq
 
 def prepare_char_sequence(seq):
@@ -101,17 +110,20 @@ def log_sum_exp(vec, m_size):
 
 class CRF(nn.Module):
 
-    def __init__(self, tagset_size, vocab_size, charset_size, gpu): # embedding_dim, hidden_dim, char_embedding_dim,
+    def __init__(self, tagset_size, vocab_size, charset_size, morph_charset_size, gpu): # embedding_dim, hidden_dim, char_embedding_dim,
         super(CRF, self).__init__()
         print("build CRF...")
         self.gpu = gpu
         # Matrix of transition parameters.  Entry i,j is the score of transitioning from i to j.
         self.tagset_size = tagset_size
         self.char_embeds = nn.Embedding(charset_size, CHAR_EMBEDDING_DIM, padding_idx=0)
+        self.morphchar_embeds = nn.Embedding(morph_charset_size, MORPH_EMBEDDING_DIM, padding_idx=0)
         self.word_embeds = nn.Embedding(vocab_size, EMBEDDING_DIM, padding_idx=0)
         self.lstm_char = nn.LSTM(CHAR_EMBEDDING_DIM, CHAR_EMBEDDING_DIM// 2,
                             num_layers=1, bidirectional=True, batch_first=True)
-        self.lstm = nn.LSTM(EMBEDDING_DIM+CHAR_EMBEDDING_DIM, HIDDEN_DIM // 2,
+        self.lstm_morphchar = nn.LSTM(MORPH_EMBEDDING_DIM, MORPH_EMBEDDING_DIM // 2,
+                                      num_layers=1, bidirectional=True, batch_first=True)
+        self.lstm = nn.LSTM(EMBEDDING_DIM+CHAR_EMBEDDING_DIM+MORPH_EMBEDDING_DIM, HIDDEN_DIM // 2,
                             num_layers=1, bidirectional=True, batch_first=True)
         self.hidden2tag = nn.Linear(HIDDEN_DIM, self.tagset_size+2)
 
@@ -182,20 +194,17 @@ class CRF(nn.Module):
         final_partition = cur_partition[:, STOP_TAG]
         return final_partition.sum(), scores
 
-    def _get_lstm_features(self, sentence_batch, char_sentence, char_lengths, perm_idx):
-        batch_size = sentence_batch.shape[0]
-        batch_length = sentence_batch.shape[1]
-
-        # hiddens = torch.zeros(batch_size, batch_length, CHAR_EMBEDDING_DIM)
-        # for i in range(batch_size):
-        #     char_sentence = char_sentences[i]
-        #     char_lengths = char_lengthss[i]
-        #     perm_idx = perm_idcs[i]
-
-        char_embeds = self.char_embeds(char_sentence)
-        packed = pack_padded_sequence(char_embeds, char_lengths, batch_first=True)
-        packed_out, (hidden, cell) = self.lstm_char(packed)
-
+    def _get_char_hidden(self, char_sentence, char_lengths, perm_idx, char_or_morph):
+        if char_or_morph == 'char':
+            char_embeds = self.char_embeds(char_sentence)
+            packed = pack_padded_sequence(char_embeds, char_lengths, batch_first=True)
+            packed_out, (hidden, cell) = self.lstm_char(packed)
+        elif char_or_morph == 'morph':
+            char_embeds = self.morphchar_embeds(char_sentence)
+            packed = pack_padded_sequence(char_embeds, char_lengths, batch_first=True)
+            packed_out, (hidden, cell) = self.lstm_morphchar(packed)
+        else:
+            raise Exception('char_or_morph variable should be either \'char\' or \'morph\'')
         # sort tuple of original index and permutation index according to permutation index in order to reverse the sort
         reverse_perm = sorted(list(zip(range(len(char_sentence)), perm_idx.numpy())), key=lambda x: x[1])
         # get rid of permutation index to use it as index slicer; to get the right hidden layer of character embeddings
@@ -204,12 +213,20 @@ class CRF(nn.Module):
         # reshape from 3d to 2d to match shape of word embeddings
         hidden = hidden.view(len(char_sentence), -1)
         hidden = hidden[reverse_perm]
+        return hidden
+
+    def _get_lstm_features(self, sentence_batch, char_sentence, char_lengths, perm_idx, batch_morph_input, batch_morph_lengths, batch_morph_perm):
+        batch_size = sentence_batch.shape[0]
+        batch_length = sentence_batch.shape[1]
+
+        hidden = self._get_char_hidden(char_sentence, char_lengths, perm_idx, 'char')
         hidden = hidden.view(batch_size, batch_length, CHAR_EMBEDDING_DIM)
-            # hiddens[i, :len(char_sentence), :] = hidden
+
+        hidden_morph = self._get_char_hidden(batch_morph_input, batch_morph_lengths, batch_morph_perm, 'morph')
+        hidden_morph = hidden_morph.view(batch_size, batch_length, MORPH_EMBEDDING_DIM)
 
         word_embeds = self.word_embeds(sentence_batch)
-        word_char_embeds = torch.cat((word_embeds, hidden), dim=2)
-
+        word_char_embeds = torch.cat((word_embeds, hidden, hidden_morph), dim=2)
 
         # embeds = self.word_embeds(sentence_batch).view(batch_size, batch_length, -1)
         embeds = word_char_embeds.view(batch_size, batch_length, -1)
@@ -312,8 +329,8 @@ class CRF(nn.Module):
         decode_idx = decode_idx.transpose(1,0)
         return path_score, decode_idx
 
-    def forward(self, batch_sentences, mask, char_sentence, char_lengths, perm_idx):
-        feats = self._get_lstm_features(batch_sentences, char_sentence, char_lengths, perm_idx)
+    def forward(self, batch_sentences, mask, char_sentence, char_lengths, perm_idx, batch_morph_input, batch_morph_lengths, batch_morph_perm):
+        feats = self._get_lstm_features(batch_sentences, char_sentence, char_lengths, perm_idx, batch_morph_input, batch_morph_lengths, batch_morph_perm)
         path_score, best_path = self._viterbi_decode(feats, mask)
         return path_score, best_path
         
@@ -369,9 +386,9 @@ class CRF(nn.Module):
         gold_score = tg_energy.sum() + end_energy.sum()
         return gold_score
 
-    def neg_log_likelihood(self, sents, mask, tags, char_sentence, char_lengths, perm_idx):
+    def neg_log_likelihood(self, sents, mask, tags, char_sentence, char_lengths, perm_idx, batch_morph_input, batch_morph_lengths, batch_morph_perm):
         # nonegative log likelihood
-        feats = self._get_lstm_features(sents, char_sentence, char_lengths, perm_idx)
+        feats = self._get_lstm_features(sents, char_sentence, char_lengths, perm_idx, batch_morph_input, batch_morph_lengths, batch_morph_perm)
         forward_score, scores = self._calculate_PZ(feats, mask)
         gold_score = self._score_sentence(scores, mask, tags)
         # print "batch, f:", forward_score.data[0], " g:", gold_score.data[0], " dis:", forward_score.data[0] - gold_score.data[0]
@@ -382,23 +399,26 @@ class CRF(nn.Module):
         return forward_score - gold_score
 
 
-model = CRF(tagset_size=len(tag_to_ix)+1, vocab_size=len(word_to_ix)+1, charset_size=len(char_to_ix), gpu=False)
+model = CRF(tagset_size=len(tag_to_ix)+1, vocab_size=len(word_to_ix)+1, charset_size=len(char_to_ix), morph_charset_size=len(morphchar_to_ix), gpu=False)
 optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-4)
 
 # Check predictions before training
 with torch.no_grad():
     precheck_sent = prepare_sequence(training_data[0][0], word_to_ix).view(1, len(training_data[0][0]))
     mask = torch.ones(precheck_sent.shape)
-    char_inputs, char_lengths, perm_idx = prepare_char_sequence(prepare_char_sentence(training_data[0][0]))
-    print(model(precheck_sent, mask, char_inputs, char_lengths, perm_idx))
+    char_inputs, char_lengths, perm_idx = prepare_char_sequence(prepare_char_sentence(training_data[0][0], char_to_ix))
+    morph_inputs, moprh_lengths, morph_perm = prepare_char_sequence(prepare_char_sentence(training_data[0][2], morphchar_to_ix))
+    print(model(precheck_sent, mask, char_inputs, char_lengths, perm_idx, morph_inputs, moprh_lengths, morph_perm))
 
 X_tr = []
 y_tr = []
 char_tr = []
-for sentence,tags in training_data*100:
+morph_tr = []
+for sentence, tags, morphs in training_data*100:
     X_tr.append(prepare_sequence(sentence, word_to_ix))
     y_tr.append(prepare_sequence(tags, tag_to_ix))
-    char_tr.append(prepare_char_sentence(sentence))
+    char_tr.append(prepare_char_sentence(sentence, char_to_ix))
+    morph_tr.append(prepare_char_sentence(morphs, morphchar_to_ix))
 
 
 batch_size = 32
@@ -424,9 +444,16 @@ for epoch in range(10):  # again, normally you would NOT do 300 epochs, it is to
         batch_char_input = list(itertools.chain.from_iterable(batch_char_input))
         batch_char_input, batch_char_lengths, batch_perm_idcs = prepare_char_sequence(batch_char_input)
 
+        batch_morph_input = morph_tr[index:index + batch_size]
+        sentence_lengths = list(map(len, batch_morph_input))
+        pads = [[[morphchar_to_ix['<PAD>']]] * (batch_sentences.shape[1] - n) for n in sentence_lengths]
+        batch_morph_input = [a + b for (a, b) in zip(batch_morph_input, pads)]
+        batch_morph_input = list(itertools.chain.from_iterable(batch_morph_input))
+        batch_morph_input, batch_morph_lengths, batch_morph_perm = prepare_char_sequence(batch_morph_input)
+
         # Step 3. Run our forward pass.
         loss = model.neg_log_likelihood(batch_sentences, mask, batch_tags, batch_char_input, batch_char_lengths,
-                                        batch_perm_idcs)
+                                        batch_perm_idcs, batch_morph_input, batch_morph_lengths, batch_morph_perm)
         # print(loss)
         # Step 4. Compute the loss, gradients, and update the parameters by
         # calling optimizer.step()
@@ -438,8 +465,10 @@ for epoch in range(10):  # again, normally you would NOT do 300 epochs, it is to
 with torch.no_grad():
     precheck_sent = prepare_sequence(training_data[0][0], word_to_ix).view(1, len(training_data[0][0]))
     mask = torch.ones(precheck_sent.shape)
-    char_inputs, char_lengths, perm_idx = prepare_char_sequence(prepare_char_sentence(training_data[0][0]))
-    print(model(precheck_sent, mask, char_inputs, char_lengths, perm_idx))
+    char_inputs, char_lengths, perm_idx = prepare_char_sequence(prepare_char_sentence(training_data[0][0], char_to_ix))
+    morph_inputs, moprh_lengths, morph_perm = prepare_char_sequence(
+        prepare_char_sentence(training_data[0][2], morphchar_to_ix))
+    print(model(precheck_sent, mask, char_inputs, char_lengths, perm_idx, morph_inputs, moprh_lengths, morph_perm))
 
 
 t1 = datetime.datetime.now()
