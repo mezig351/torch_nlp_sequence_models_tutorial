@@ -1,4 +1,4 @@
-torch Natural Language Processing Tutorial Solutions
+torch Natural Language Processing Tutorial Solutions:
 ---
 
 Update: Now there is Tutorial 5 solutions too, batched and/or combined with tutorial 4; and the notebooks for the previous tutorials. 
