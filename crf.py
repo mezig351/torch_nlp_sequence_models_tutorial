@@ -20,7 +20,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 
 t0 = datetime.datetime.now()
-torch.manual_seed(1)
+# torch.manual_seed(1)
 
 START_TAG = -2
 STOP_TAG = -1
@@ -46,6 +46,7 @@ for sentence, _, _ in training_data:
     for word in sentence:
         if word not in word_to_ix:
             word_to_ix[word] = len(word_to_ix)+1
+word_to_ix['<PAD>'] = 0
 
 tag_to_ix = {"B": 1, "I": 2, "O": 3}
 
@@ -132,8 +133,8 @@ class CRF(nn.Module):
         init_transitions = torch.zeros(self.tagset_size+2, self.tagset_size+2)
         init_transitions[:,START_TAG] = -10000.0
         init_transitions[STOP_TAG,:] = -10000.0
-        # init_transitions[:,0] = -10000.0
-        # init_transitions[0,:] = -10000.0
+        init_transitions[:,0] = -10000.0
+        init_transitions[0,:] = -10000.0
         if torch.cuda.is_available():
             init_transitions = init_transitions.cuda(self.gpu)
         self.transitions = nn.Parameter(init_transitions)
@@ -172,22 +173,22 @@ class CRF(nn.Module):
             # previous to_target is current from_target
             # partition: previous results log(exp(from_target)), #(batch_size * from_target)
             # cur_values: bat_size * from_target * to_target
-            
+
             cur_values = cur_values + partition.contiguous().view(batch_size, tag_size, 1).expand(batch_size, tag_size, tag_size)
             cur_partition = log_sum_exp(cur_values, tag_size)
             # print cur_partition.data
-            
+
                 # (bat_size * from_target * to_target) -> (bat_size * to_target)
             # partition = utils.switch(partition, cur_partition, mask[idx].view(bat_size, 1).expand(bat_size, self.tagset_size)).view(bat_size, -1)
             mask_idx = mask[idx, :].view(batch_size, 1).expand(batch_size, tag_size)
-            
+
             ## effective updated partition part, only keep the partition value of mask value = 1
             masked_cur_partition = cur_partition.masked_select(mask_idx)
             ## let mask_idx broadcastable, to disable warning
             mask_idx = mask_idx.contiguous().view(batch_size, tag_size, 1)
 
             ## replace the partition where the maskvalue=1, other partition value keeps the same
-            partition.masked_scatter_(mask_idx, masked_cur_partition)  
+            partition.masked_scatter_(mask_idx, masked_cur_partition)
         # until the last state, add transition score for all partition (and do log_sum_exp) then select the value in STOP_TAG
         cur_values = self.transitions.view(1,tag_size, tag_size).expand(batch_size, tag_size, tag_size) + partition.contiguous().view(batch_size, tag_size, 1).expand(batch_size, tag_size, tag_size)
         cur_partition = log_sum_exp(cur_values, tag_size)
@@ -204,7 +205,7 @@ class CRF(nn.Module):
             packed = pack_padded_sequence(char_embeds, char_lengths, batch_first=True)
             packed_out, (hidden, cell) = self.lstm_morphchar(packed)
         else:
-            raise Exception('char_or_morph variable should be either \'char\' or \'morph\'')
+            raise ValueError('char_or_morph variable should be either \'char\' or \'morph\'')
         # sort tuple of original index and permutation index according to permutation index in order to reverse the sort
         reverse_perm = sorted(list(zip(range(len(char_sentence)), perm_idx.numpy())), key=lambda x: x[1])
         # get rid of permutation index to use it as index slicer; to get the right hidden layer of character embeddings
@@ -289,7 +290,7 @@ class CRF(nn.Module):
             partition_history.append(partition)
             ## cur_bp: (batch_size, tag_size) max source score position in current tag
             ## set padded label as 0, which will be filtered in post processing
-            cur_bp.masked_fill_(mask[idx].view(batch_size, 1).expand(batch_size, tag_size), 0) 
+            cur_bp.masked_fill_(mask[idx].view(batch_size, 1).expand(batch_size, tag_size), 0)
             back_points.append(cur_bp)
         # exit(0)
         ### add score to final STOP_TAG
@@ -305,7 +306,7 @@ class CRF(nn.Module):
             pad_zero = pad_zero.cuda(self.gpu)
         back_points.append(pad_zero)
         back_points  =  torch.cat(back_points).view(seq_len, batch_size, tag_size)
-        
+
         ## select end ids in STOP_TAG
         pointer = last_bp[:, STOP_TAG]
         insert_last = pointer.contiguous().view(batch_size,1,1).expand(batch_size,1, tag_size)
@@ -399,7 +400,7 @@ class CRF(nn.Module):
         return forward_score - gold_score
 
 
-model = CRF(tagset_size=len(tag_to_ix)+1, vocab_size=len(word_to_ix)+1, charset_size=len(char_to_ix), morph_charset_size=len(morphchar_to_ix), gpu=False)
+model = CRF(tagset_size=len(tag_to_ix), vocab_size=len(word_to_ix), charset_size=len(char_to_ix), morph_charset_size=len(morphchar_to_ix), gpu=False)
 optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-4)
 
 # Check predictions before training

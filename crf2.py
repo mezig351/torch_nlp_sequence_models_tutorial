@@ -20,7 +20,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 
 t0 = datetime.datetime.now()
-torch.manual_seed(1)
+# torch.manual_seed(1)
 
 START_TAG = -2
 STOP_TAG = -1
@@ -400,6 +400,9 @@ class CRF(nn.Module):
 model = CRF(tagset_size=len(tag_to_ix) + 1, vocab_size=len(word_to_ix) + 1, charset_size=len(char_to_ix), gpu=False)
 optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-4)
 
+from random import shuffle
+shuffle(training_data)
+torch.manual_seed(50)
 # Check predictions before training
 with torch.no_grad():
     precheck_sent = prepare_sequence(training_data[0][0], word_to_ix).view(1, len(training_data[0][0]))
